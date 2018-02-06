@@ -1,6 +1,7 @@
 import /init.recovery.logd.rc
 import /init.recovery.usb.rc
 import /init.recovery.service.rc
+import /init.recovery.vold_decrypt.rc
 import /init.recovery.${ro.hardware}.rc
 
 on early-init
@@ -23,7 +24,7 @@ service set_permissive /sbin/permissive.sh
 
 on init
     export PATH /sbin:/system/bin
-    export LD_LIBRARY_PATH .:/sbin
+    export LD_LIBRARY_PATH /sbin
 
     export ANDROID_ROOT /system
     export ANDROID_DATA /data
@@ -85,9 +86,6 @@ on late-init
     # Load properties from /system/ + /factory after fs mount. Place
     # this in another action so that the load will be scheduled after the prior
     # issued fs triggers have completed.
-    trigger load_system_props_action
-
-    # Load properties, Android 6.0+
     trigger load_system_props_action
 
     # Load properties, Android 6.0+, vendor init lives here

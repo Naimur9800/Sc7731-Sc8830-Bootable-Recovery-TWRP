@@ -64,7 +64,7 @@ int TWFunc::Exec_Cmd(const string& cmd, string &result) {
 	int ret = 0;
 	exec = __popen(cmd.c_str(), "r");
 	if (!exec) return -1;
-	while(!feof(exec)) {
+	while (!feof(exec)) {
 		if (fgets(buffer, 128, exec) != NULL) {
 			result += buffer;
 		}
@@ -142,8 +142,42 @@ int TWFunc::Wait_For_Child(pid_t pid, int *status, string Child_Name) {
 	return 0;
 }
 
+int TWFunc::Wait_For_Child_Timeout(pid_t pid, int *status, const string& Child_Name, int timeout) {
+	pid_t retpid = waitpid(pid, status, WNOHANG);
+	for (; retpid == 0 && timeout; --timeout) {
+		sleep(1);
+		retpid = waitpid(pid, status, WNOHANG);
+	}
+	if (retpid == 0 && timeout == 0) {
+		LOGERR("%s took too long, killing process\n", Child_Name.c_str());
+		kill(pid, SIGKILL);
+		int died = 0;
+		for (timeout = 5; retpid == 0 && timeout; --timeout) {
+			sleep(1);
+			retpid = waitpid(pid, status, WNOHANG);
+		}
+		if (retpid)
+			LOGINFO("Child process killed successfully\n");
+		else
+			LOGINFO("Child process took too long to kill, may be a zombie process\n");
+		return -1;
+	} else if (retpid > 0) {
+		if (WIFSIGNALED(*status)) {
+			gui_msg(Msg(msg::kError, "pid_signal={1} process ended with signal: {2}")(Child_Name)(WTERMSIG(*status))); // Seg fault or some other non-graceful termination
+			return -1;
+		}
+	} else if (retpid < 0) { // no PID returned
+		if (errno == ECHILD)
+			LOGERR("%s no child process exist\n", Child_Name.c_str());
+		else {
+			LOGERR("%s Unexpected error %d\n", Child_Name.c_str(), errno);
+			return -1;
+		}
+	}
+	return 0;
+}
+
 bool TWFunc::Path_Exists(string Path) {
-	// Check to see if the Path exists
 	struct stat st;
 	if (stat(Path.c_str(), &st) != 0)
 		return false;
@@ -179,20 +213,20 @@ int TWFunc::Try_Decrypting_File(string fn, string password) {
 	uint8_t *buffer_out = NULL;
 	uint8_t *ptr = NULL;
 	size_t read_len = 0, out_len = 0;
-	int firstbyte = 0, secondbyte = 0, key_len;
+	int firstbyte = 0, secondbyte = 0;
 	size_t _j = 0;
 	size_t _key_data_len = 0;
 
 	// mostly kanged from OpenAES oaes.c
-	for( _j = 0; _j < 32; _j++ )
+	for ( _j = 0; _j < 32; _j++ )
 		_key_data[_j] = _j + 1;
 	_key_data_len = password.size();
-	if( 16 >= _key_data_len )
+	if ( 16 >= _key_data_len )
 		_key_data_len = 16;
-	else if( 24 >= _key_data_len )
+	else if ( 24 >= _key_data_len )
 		_key_data_len = 24;
 	else
-	_key_data_len = 32;
+		_key_data_len = 32;
 	memcpy(_key_data, password.c_str(), password.size());
 
 	ctx = oaes_alloc();
@@ -282,13 +316,13 @@ std::string TWFunc::Remove_Trailing_Slashes(const std::string& path, bool leaveL
 	std::string res;
 	size_t last_idx = 0, idx = 0;
 
-	while(last_idx != std::string::npos)
+	while (last_idx != std::string::npos)
 	{
-		if(last_idx != 0)
+		if (last_idx != 0)
 			res += '/';
 
 		idx = path.find_first_of('/', last_idx);
-		if(idx == std::string::npos) {
+		if (idx == std::string::npos) {
 			res += path.substr(last_idx, idx);
 			break;
 		}
@@ -297,7 +331,7 @@ std::string TWFunc::Remove_Trailing_Slashes(const std::string& path, bool leaveL
 		last_idx = path.find_first_not_of('/', idx);
 	}
 
-	if(leaveLast)
+	if (leaveLast)
 		res += '/';
 	return res;
 }
@@ -318,13 +352,13 @@ vector<string> TWFunc::split_string(const string &in, char del, bool skip_empty)
 	string field;
 	istringstream f(in);
 	if (del == '\n') {
-		while(getline(f, field)) {
+		while (getline(f, field)) {
 			if (field.empty() && skip_empty)
 				continue;
-		res.push_back(field);
+			res.push_back(field);
 		}
 	} else {
-		while(getline(f, field, del)) {
+		while (getline(f, field, del)) {
 			if (field.empty() && skip_empty)
 				continue;
 			res.push_back(field);
@@ -498,20 +532,30 @@ void TWFunc::Update_Log_File(void) {
 		chown("/cache/recovery/log", 1000, 1000);
 		chmod("/cache/recovery/log", 0600);
 		chmod("/cache/recovery/last_log", 0640);
+	} else if (PartitionManager.Mount_By_Path("/data", false) && TWFunc::Path_Exists("/data/cache/recovery/.")) {
+		Copy_Log(TMP_LOG_FILE, "/data/cache/recovery/log");
+		copy_file("/data/cache/recovery/log", "/data/cache/recovery/last_log", 600);
+		chown("/data/cache/recovery/log", 1000, 1000);
+		chmod("/data/cache/recovery/log", 0600);
+		chmod("/data/cache/recovery/last_log", 0640);
 	} else {
-		LOGINFO("Failed to mount /cache for TWFunc::Update_Log_File\n");
+		LOGINFO("Failed to mount /cache or find /data/cache for TWFunc::Update_Log_File\n");
 	}
 
 	// Reset bootloader message
 	TWPartition* Part = PartitionManager.Find_Partition_By_Path("/misc");
 	if (Part != NULL) {
-		struct bootloader_message boot;
-		memset(&boot, 0, sizeof(boot));
-		if (set_bootloader_message(&boot) != 0)
-			LOGERR("Unable to set bootloader message.\n");
+		string err;
+		if (!clear_bootloader_message(&err)) {
+			if (err == "no misc device set") {
+				LOGINFO("%s\n", err.c_str());
+			} else {
+				LOGERR("%s\n", err.c_str());
+			}
+		}
 	}
 
-	if (PartitionManager.Mount_By_Path("/cache", true)) {
+	if (PartitionManager.Mount_By_Path("/cache", false)) {
 		if (unlink("/cache/recovery/command") && errno != ENOENT) {
 			LOGINFO("Can't unlink %s\n", "/cache/recovery/command");
 		}
@@ -778,7 +822,10 @@ string TWFunc::System_Property_Get(string Prop_Name) {
 	string propvalue;
 	if (!PartitionManager.Mount_By_Path("/system", true))
 		return propvalue;
-	if (TWFunc::read_file("/system/build.prop", buildprop) != 0) {
+	string prop_file = "/system/build.prop";
+	if (!TWFunc::Path_Exists(prop_file))
+		prop_file = "/system/system/build.prop"; // for devices with system as a root file system (e.g. Pixel)
+	if (TWFunc::read_file(prop_file, buildprop) != 0) {
 		LOGINFO("Unable to open /system/build.prop for getting '%s'.\n", Prop_Name.c_str());
 		DataManager::SetValue(TW_BACKUP_NAME, Get_Current_Date());
 		if (!mount_state)
@@ -876,49 +923,48 @@ void TWFunc::Fixup_Time_On_Boot()
 	static const char *paths[] = { "/data/system/time/", "/data/time/"  };
 
 	FILE *f;
-	DIR *d;
 	offset = 0;
 	struct dirent *dt;
 	std::string ats_path;
 
-	if(!PartitionManager.Mount_By_Path("/data", false))
+	if (!PartitionManager.Mount_By_Path("/data", false))
 		return;
 
 	// Prefer ats_2, it seems to be the one we want according to logcat on hammerhead
 	// - it is the one for ATS_TOD (time of day?).
 	// However, I never saw a device where the offset differs between ats files.
-	for(size_t i = 0; i < (sizeof(paths)/sizeof(paths[0])); ++i)
+	for (size_t i = 0; i < (sizeof(paths)/sizeof(paths[0])); ++i)
 	{
 		DIR *d = opendir(paths[i]);
-		if(!d)
+		if (!d)
 			continue;
 
-		while((dt = readdir(d)))
+		while ((dt = readdir(d)))
 		{
-			if(dt->d_type != DT_REG || strncmp(dt->d_name, "ats_", 4) != 0)
+			if (dt->d_type != DT_REG || strncmp(dt->d_name, "ats_", 4) != 0)
 				continue;
 
-			if(ats_path.empty() || strcmp(dt->d_name, "ats_2") == 0)
+			if (ats_path.empty() || strcmp(dt->d_name, "ats_2") == 0)
 				ats_path = std::string(paths[i]).append(dt->d_name);
 		}
 
 		closedir(d);
 	}
 
-	if(ats_path.empty())
+	if (ats_path.empty())
 	{
 		LOGINFO("TWFunc::Fixup_Time: no ats files found, leaving untouched!\n");
 		return;
 	}
 
 	f = fopen(ats_path.c_str(), "r");
-	if(!f)
+	if (!f)
 	{
 		LOGINFO("TWFunc::Fixup_Time: failed to open file %s\n", ats_path.c_str());
 		return;
 	}
 
-	if(fread(&offset, sizeof(offset), 1, f) != 1)
+	if (fread(&offset, sizeof(offset), 1, f) != 1)
 	{
 		LOGINFO("TWFunc::Fixup_Time: failed load uint64 from file %s\n", ats_path.c_str());
 		fclose(f);
@@ -933,7 +979,7 @@ void TWFunc::Fixup_Time_On_Boot()
 	tv.tv_sec += offset/1000;
 	tv.tv_usec += (offset%1000)*1000;
 
-	while(tv.tv_usec >= 1000000)
+	while (tv.tv_usec >= 1000000)
 	{
 		++tv.tv_sec;
 		tv.tv_usec -= 1000000;
@@ -951,13 +997,13 @@ std::vector<std::string> TWFunc::Split_String(const std::string& str, const std:
 	std::vector<std::string> res;
 	size_t idx = 0, idx_last = 0;
 
-	while(idx < str.size())
+	while (idx < str.size())
 	{
 		idx = str.find_first_of(delimiter, idx_last);
-		if(idx == std::string::npos)
+		if (idx == std::string::npos)
 			idx = str.size();
 
-		if(idx-idx_last != 0 || !removeEmpty)
+		if (idx-idx_last != 0 || !removeEmpty)
 			res.push_back(str.substr(idx_last, idx-idx_last));
 
 		idx_last = idx + delimiter.size();
@@ -971,12 +1017,12 @@ bool TWFunc::Create_Dir_Recursive(const std::string& path, mode_t mode, uid_t ui
 	std::vector<std::string> parts = Split_String(path, "/");
 	std::string cur_path;
 	struct stat info;
-	for(size_t i = 0; i < parts.size(); ++i)
+	for (size_t i = 0; i < parts.size(); ++i)
 	{
 		cur_path += "/" + parts[i];
-		if(stat(cur_path.c_str(), &info) < 0 || !S_ISDIR(info.st_mode))
+		if (stat(cur_path.c_str(), &info) < 0 || !S_ISDIR(info.st_mode))
 		{
-			if(mkdir(cur_path.c_str(), mode) < 0)
+			if (mkdir(cur_path.c_str(), mode) < 0)
 				return false;
 			chown(cur_path.c_str(), uid, gid);
 		}
@@ -1066,4 +1112,14 @@ unsigned long long TWFunc::IOCTL_Get_Block_Size(const char* block_device) {
 	return 0;
 }
 
+void TWFunc::copy_kernel_log(string curr_storage) {
+	std::string dmesgDst = curr_storage + "/dmesg.log";
+	std::string dmesgCmd = "/sbin/dmesg";
+
+	std::string result;
+	Exec_Cmd(dmesgCmd, result);
+	write_file(dmesgDst, result);
+	gui_msg(Msg("copy_kernel_log=Copied kernel log to {1}")(dmesgDst));
+	tw_set_default_metadata(dmesgDst.c_str());
+}
 #endif // ndef BUILD_TWRPTAR_MAIN

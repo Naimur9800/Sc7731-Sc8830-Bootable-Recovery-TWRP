@@ -40,19 +40,32 @@
 #include "variables.h"
 #include "data.hpp"
 #include "partitions.hpp"
-#include "twrpDigest.hpp"
+#include "twrpDigestDriver.hpp"
+#include "twrpDigest/twrpDigest.hpp"
+#include "twrpDigest/twrpMD5.hpp"
 #include "twrp-functions.hpp"
 #include "gui/gui.hpp"
 #include "gui/pages.hpp"
 #include "legacy_property_service.h"
+#include "twinstall.h"
+#include "installcommand.h"
 extern "C" {
 	#include "gui/gui.h"
 }
+
+#define AB_OTA "payload_properties.txt"
 
 static const char* properties_path = "/dev/__properties__";
 static const char* properties_path_renamed = "/dev/__properties_kk__";
 static bool legacy_props_env_initd = false;
 static bool legacy_props_path_modified = false;
+
+enum zip_type {
+	UNKNOWN_ZIP_TYPE = 0,
+	UPDATE_BINARY_ZIP_TYPE,
+	AB_OTA_ZIP_TYPE,
+	TWRP_THEME_ZIP_TYPE
+};
 
 // to support pre-KitKat update-binaries that expect properties in the legacy format
 static int switch_to_legacy_properties()
@@ -126,26 +139,22 @@ static int Install_Theme(const char* path, ZipArchive *Zip) {
 #endif
 }
 
-static int Run_Update_Binary(const char *path, ZipArchive *Zip, int* wipe_cache) {
+static int Prepare_Update_Binary(const char *path, ZipArchive *Zip, int* wipe_cache) {
 	const ZipEntry* binary_location = mzFindZipEntry(Zip, ASSUMED_UPDATE_BINARY_NAME);
-	string Temp_Binary = "/tmp/updater"; // Note: AOSP names it /tmp/update_binary (yes, with "_")
-	int binary_fd, ret_val, pipe_fd[2], status, zip_verify;
-	char buffer[1024];
-	const char** args = (const char**)malloc(sizeof(char*) * 5);
-	FILE* child_data;
+	int binary_fd, ret_val;
 
 	if (binary_location == NULL) {
 		return INSTALL_CORRUPT;
 	}
 
 	// Delete any existing updater
-	if (TWFunc::Path_Exists(Temp_Binary) && unlink(Temp_Binary.c_str()) != 0) {
-		LOGINFO("Unable to unlink '%s': %s\n", Temp_Binary.c_str(), strerror(errno));
+	if (TWFunc::Path_Exists(TMP_UPDATER_BINARY_PATH) && unlink(TMP_UPDATER_BINARY_PATH) != 0) {
+		LOGINFO("Unable to unlink '%s': %s\n", TMP_UPDATER_BINARY_PATH, strerror(errno));
 	}
 
-	binary_fd = creat(Temp_Binary.c_str(), 0755);
+	binary_fd = creat(TMP_UPDATER_BINARY_PATH, 0755);
 	if (binary_fd < 0) {
-		LOGERR("Could not create file for updater extract in '%s': %s\n", Temp_Binary.c_str(), strerror(errno));
+		LOGERR("Could not create file for updater extract in '%s': %s\n", TMP_UPDATER_BINARY_PATH, strerror(errno));
 		mzCloseZipArchive(Zip);
 		return INSTALL_ERROR;
 	}
@@ -189,6 +198,13 @@ static int Run_Update_Binary(const char *path, ZipArchive *Zip, int* wipe_cache)
 		}
 	}
 	mzCloseZipArchive(Zip);
+	return INSTALL_SUCCESS;
+}
+
+static int Run_Update_Binary(const char *path, ZipArchive *Zip, int* wipe_cache, zip_type ztype) {
+	int ret_val, pipe_fd[2], status, zip_verify;
+	char buffer[1024];
+	FILE* child_data;
 
 #ifndef TW_NO_LEGACY_PROPS
 	/* Set legacy properties */
@@ -201,25 +217,35 @@ static int Run_Update_Binary(const char *path, ZipArchive *Zip, int* wipe_cache)
 
 	pipe(pipe_fd);
 
-	args[0] = Temp_Binary.c_str();
-	args[1] = EXPAND(RECOVERY_API_VERSION);
-	char* temp = (char*)malloc(10);
-	sprintf(temp, "%d", pipe_fd[1]);
-	args[2] = temp;
-	args[3] = (char*)path;
-	args[4] = NULL;
+	std::vector<std::string> args;
+    if (ztype == UPDATE_BINARY_ZIP_TYPE) {
+		ret_val = update_binary_command(path, Zip, 0, pipe_fd[1], &args);
+    } else if (ztype == AB_OTA_ZIP_TYPE) {
+		ret_val = abupdate_binary_command(path, Zip, 0, pipe_fd[1], &args);
+	} else {
+		LOGERR("Unknown zip type %i\n", ztype);
+		ret_val = INSTALL_CORRUPT;
+	}
+    if (ret_val) {
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        return ret_val;
+    }
+
+	// Convert the vector to a NULL-terminated char* array suitable for execv.
+	const char* chr_args[args.size() + 1];
+	chr_args[args.size()] = NULL;
+	for (size_t i = 0; i < args.size(); i++)
+		chr_args[i] = args[i].c_str();
 
 	pid_t pid = fork();
 	if (pid == 0) {
 		close(pipe_fd[0]);
-		execve(Temp_Binary.c_str(), (char* const*)args, environ);
-		printf("E:Can't execute '%s': %s\n", Temp_Binary.c_str(), strerror(errno));
-		free(temp);
+		execve(chr_args[0], const_cast<char**>(chr_args), environ);
+		printf("E:Can't execute '%s': %s\n", chr_args[0], strerror(errno));
 		_exit(-1);
 	}
 	close(pipe_fd[1]);
-	free(temp);
-	temp = NULL;
 
 	*wipe_cache = 0;
 
@@ -293,22 +319,36 @@ extern "C" int TWinstall_zip(const char* path, int* wipe_cache) {
 
 	gui_msg(Msg("installing_zip=Installing zip file '{1}'")(path));
 	if (strlen(path) < 9 || strncmp(path, "/sideload", 9) != 0) {
-		gui_msg("check_for_md5=Checking for MD5 file...");
-		twrpDigest md5sum;
-		md5sum.setfn(path);
-		switch (md5sum.verify_md5digest()) {
-		case MD5_OK:
-			gui_msg(Msg("md5_matched=MD5 matched for '{1}'.")(path));
-			break;
-		case MD5_NOT_FOUND:
-			gui_msg("no_md5=Skipping MD5 check: no MD5 file found");
-			break;
-		case MD5_FILE_UNREADABLE:
-			LOGERR("Skipping MD5 check: MD5 file unreadable\n");
-			break;
-		case MD5_MATCH_FAIL: // md5 did not match
-			LOGERR("Aborting zip install: MD5 verification failed\n");
-			return INSTALL_CORRUPT;
+		string digest_str;
+		string Full_Filename = path;
+		string digest_file = path;
+		digest_file += ".md5";
+
+		gui_msg("check_for_digest=Checking for Digest file...");
+		if (!TWFunc::Path_Exists(digest_file)) {
+			gui_msg("no_digest=Skipping Digest check: no Digest file found");
+		}
+		else {
+			if (TWFunc::read_file(digest_file, digest_str) != 0) {
+				LOGERR("Skipping MD5 check: MD5 file unreadable\n");
+			}
+			else {
+				twrpDigest *digest = new twrpMD5();
+				if (!twrpDigestDriver::stream_file_to_digest(Full_Filename, digest)) {
+					delete digest;
+					return INSTALL_CORRUPT;
+				}
+				string digest_check = digest->return_digest_string();
+				if (digest_str == digest_check) {
+					gui_msg(Msg("digest_matched=Digest matched for '{1}'.")(path));
+				}
+				else {
+					LOGERR("Aborting zip install: Digest verification failed\n");
+					delete digest;
+					return INSTALL_CORRUPT;
+				}
+				delete digest;
+			}
 		}
 	}
 
@@ -341,16 +381,35 @@ extern "C" int TWinstall_zip(const char* path, int* wipe_cache) {
 		sysReleaseMap(&map);
 		return INSTALL_CORRUPT;
 	}
+
 	time_t start, stop;
 	time(&start);
-	ret_val = Run_Update_Binary(path, &Zip, wipe_cache);
+	const ZipEntry* file_location = mzFindZipEntry(&Zip, ASSUMED_UPDATE_BINARY_NAME);
+	if (file_location != NULL) {
+		LOGINFO("Update binary zip\n");
+		ret_val = Prepare_Update_Binary(path, &Zip, wipe_cache);
+		if (ret_val == INSTALL_SUCCESS)
+			ret_val = Run_Update_Binary(path, &Zip, wipe_cache, UPDATE_BINARY_ZIP_TYPE);
+	} else {
+		file_location = mzFindZipEntry(&Zip, AB_OTA);
+		if (file_location != NULL) {
+			LOGINFO("AB zip\n");
+			ret_val = Run_Update_Binary(path, &Zip, wipe_cache, AB_OTA_ZIP_TYPE);
+		} else {
+			file_location = mzFindZipEntry(&Zip, "ui.xml");
+			if (file_location != NULL) {
+				LOGINFO("TWRP theme zip\n");
+				ret_val = Install_Theme(path, &Zip);
+			} else {
+				mzCloseZipArchive(&Zip);
+				ret_val = INSTALL_CORRUPT;
+			}
+		}
+	}
 	time(&stop);
 	int total_time = (int) difftime(stop, start);
 	if (ret_val == INSTALL_CORRUPT) {
-		// If no updater binary is found, check for ui.xml
-		ret_val = Install_Theme(path, &Zip);
-		if (ret_val == INSTALL_CORRUPT)
-			gui_msg(Msg(msg::kError, "no_updater_binary=Could not find '{1}' in the zip file.")(ASSUMED_UPDATE_BINARY_NAME));
+		gui_err("invalid_zip_format=Invalid zip file format!");
 	} else {
 		LOGINFO("Install took %i second(s).\n", total_time);
 	}

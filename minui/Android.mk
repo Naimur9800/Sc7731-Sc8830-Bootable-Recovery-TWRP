@@ -6,13 +6,13 @@ LOCAL_SRC_FILES := \
     graphics.cpp \
     graphics_drm.cpp \
     graphics_fbdev.cpp \
-    resources.cpp \
-    graphics_overlay.cpp
+    resources.cpp
 
 LOCAL_C_INCLUDES := external/libcxx/include external/libpng
 
 ifeq ($(TW_TARGET_USES_QCOM_BSP), true)
   LOCAL_CFLAGS += -DMSM_BSP
+  LOCAL_SRC_FILES += graphics_overlay.cpp
   ifeq ($(TARGET_PREBUILT_KERNEL),)
     LOCAL_ADDITIONAL_DEPENDENCIES := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
     LOCAL_C_INCLUDES += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
@@ -78,6 +78,10 @@ ifneq ($(TW_NO_SCREEN_BLANK),)
 endif
 ifneq ($(BOARD_USE_CUSTOM_RECOVERY_FONT),)
   LOCAL_CFLAGS += -DBOARD_USE_CUSTOM_RECOVERY_FONT=$(BOARD_USE_CUSTOM_RECOVERY_FONT)
+endif
+ifeq ($(wildcard system/core/healthd/animation.h),)
+    TARGET_GLOBAL_CFLAGS += -DTW_NO_MINUI_CUSTOM_FONTS
+    CLANG_TARGET_GLOBAL_CFLAGS += -DTW_NO_MINUI_CUSTOM_FONTS
 endif
 include $(BUILD_STATIC_LIBRARY)
 

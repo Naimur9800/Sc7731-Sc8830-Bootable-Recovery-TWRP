@@ -35,8 +35,10 @@
 #include <inttypes.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
+#include <android-base/file.h>
 #include <android-base/parseint.h>
 #include <android-base/strings.h>
 #include <android-base/stringprintf.h>
@@ -970,7 +972,6 @@ Value* GetPropFn(const char* name, State* state, int argc, Expr* argv[]) {
     return StringValue(strdup(value));
 }
 
-
 // file_getprop(file, key)
 //
 //   interprets 'file' as a getprop-style file (key=value pairs, one
@@ -1421,7 +1422,7 @@ Value* ReadFileFn(const char* name, State* state, int argc, Expr* argv[]) {
     v->data = nullptr;
 
     FileContents fc;
-    if (LoadFileContents(filename, &fc) != 0) {
+    if (LoadFileContents(filename, &fc) == 0) {
         v->data = static_cast<char*>(malloc(fc.data.size()));
         if (v->data != nullptr) {
             memcpy(v->data, fc.data.data(), fc.data.size());
@@ -1430,6 +1431,31 @@ Value* ReadFileFn(const char* name, State* state, int argc, Expr* argv[]) {
     }
     free(filename);
     return v;
+}
+
+// write_value(value, filename)
+//   Writes 'value' to 'filename'.
+//   Example: write_value("960000", "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq")
+Value* WriteValueFn(const char* name, State* state, int argc, Expr* argv[]) {
+    if (argc != 2) {
+        return ErrorAbort(state, kArgsParsingFailure, "%s() expects 2 args, got %d", name, argc);
+    }
+
+    char* value;
+    char* filename;
+    if (ReadArgs(state, argv, 2, &value, &filename) < 0) {
+        return ErrorAbort(state, kArgsParsingFailure, "%s(): Failed to parse the argument(s)",
+                          name);
+    }
+
+    bool ret = android::base::WriteStringToFile(value, filename);
+    if (!ret) {
+        printf("%s: Failed to write to \"%s\": %s\n", name, filename, strerror(errno));
+    }
+
+    free(value);
+    free(filename);
+    return StringValue(strdup(ret ? "t" : ""));
 }
 
 // Immediately reboot the device.  Recovery is not finished normally,
@@ -1456,6 +1482,7 @@ Value* RebootNowFn(const char* name, State* state, int argc, Expr* argv[]) {
     memset(buffer, 0, sizeof(((struct bootloader_message*)0)->command));
     FILE* f = fopen(filename, "r+b");
     fseek(f, offsetof(struct bootloader_message, command), SEEK_SET);
+    fseek(f, BOOTLOADER_MESSAGE_OFFSET_IN_MISC, SEEK_CUR);
     ota_fwrite(buffer, sizeof(((struct bootloader_message*)0)->command), 1, f);
     fclose(f);
     free(filename);
@@ -1498,6 +1525,7 @@ Value* SetStageFn(const char* name, State* state, int argc, Expr* argv[]) {
     // package installation.
     FILE* f = fopen(filename, "r+b");
     fseek(f, offsetof(struct bootloader_message, stage), SEEK_SET);
+    fseek(f, BOOTLOADER_MESSAGE_OFFSET_IN_MISC, SEEK_CUR);
     int to_write = strlen(stagestr)+1;
     int max_size = sizeof(((struct bootloader_message*)0)->stage);
     if (to_write > max_size) {
@@ -1524,6 +1552,7 @@ Value* GetStageFn(const char* name, State* state, int argc, Expr* argv[]) {
     char buffer[sizeof(((struct bootloader_message*)0)->stage)];
     FILE* f = fopen(filename, "rb");
     fseek(f, offsetof(struct bootloader_message, stage), SEEK_SET);
+    fseek(f, BOOTLOADER_MESSAGE_OFFSET_IN_MISC, SEEK_CUR);
     ota_fread(buffer, sizeof(buffer), 1, f);
     fclose(f);
     buffer[sizeof(buffer)-1] = '\0';
@@ -1635,6 +1664,7 @@ void RegisterInstallFunctions() {
     RegisterFunction("read_file", ReadFileFn);
     RegisterFunction("sha1_check", Sha1CheckFn);
     RegisterFunction("rename", RenameFn);
+    RegisterFunction("write_value", WriteValueFn);
 
     RegisterFunction("wipe_cache", WipeCacheFn);
 

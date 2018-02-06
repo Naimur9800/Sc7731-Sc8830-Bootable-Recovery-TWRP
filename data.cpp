@@ -20,6 +20,7 @@
 #include <time.h>
 #include <string>
 #include <sstream>
+#include <fstream>
 #include <cctype>
 #include <cutils/properties.h>
 #include <unistd.h>
@@ -90,7 +91,6 @@ void DataManager::sanitize_device_id(char* device_id) {
 
 void DataManager::get_device_id(void) {
 	FILE *fp;
-	size_t i;
 	char line[2048];
 	char hardware_id[HWID_MAX] = { 0 };
 	char device_id[DEVID_MAX] = { 0 };
@@ -103,7 +103,7 @@ void DataManager::get_device_id(void) {
 	if (strcmp(model_id, "error") != 0) {
 		LOGINFO("=> product model: '%s'\n", model_id);
 		// Replace spaces with underscores
-		for (i = 0; i < strlen(model_id); i++) {
+		for (size_t i = 0; i < strlen(model_id); i++) {
 			if (model_id[i] == ' ')
 				model_id[i] = '_';
 		}
@@ -252,7 +252,7 @@ int DataManager::LoadValues(const string& filename)
 	pthread_mutex_unlock(&m_valuesLock);
 	string current = GetCurrentStoragePath();
 	TWPartition* Part = PartitionManager.Find_Partition_By_Path(current);
-	if(!Part)
+	if (!Part)
 		Part = PartitionManager.Get_Default_Storage_Partition();
 	if (Part && current != Part->Storage_Path && Part->Mount(false)) {
 		LOGINFO("LoadValues setting storage path to '%s'\n", Part->Storage_Path.c_str());
@@ -535,7 +535,7 @@ void DataManager::SetDefaultValues()
 	mPersist.SetValue("tw_action_vibrate", "160");
 
 	TWPartition *store = PartitionManager.Get_Default_Storage_Partition();
-	if(store)
+	if (store)
 		mPersist.SetValue("tw_storage_path", store->Storage_Path);
 	else
 		mPersist.SetValue("tw_storage_path", "/");
@@ -679,14 +679,14 @@ void DataManager::SetDefaultValues()
 
 	mPersist.SetValue(TW_INSTALL_REBOOT_VAR, "0");
 	mPersist.SetValue(TW_SIGNED_ZIP_VERIFY_VAR, "0");
-	mPersist.SetValue(TW_FORCE_MD5_CHECK_VAR, "0");
 	mPersist.SetValue(TW_DISABLE_FREE_SPACE_VAR, "0");
+	mPersist.SetValue(TW_FORCE_DIGEST_CHECK_VAR, "0");
 	mPersist.SetValue(TW_USE_COMPRESSION_VAR, "0");
 	mPersist.SetValue(TW_TIME_ZONE_VAR, "CST6CDT,M3.2.0,M11.1.0");
 	mPersist.SetValue(TW_GUI_SORT_ORDER, "1");
 	mPersist.SetValue(TW_RM_RF_VAR, "0");
-	mPersist.SetValue(TW_SKIP_MD5_CHECK_VAR, "0");
-	mPersist.SetValue(TW_SKIP_MD5_GENERATE_VAR, "0");
+	mPersist.SetValue(TW_SKIP_DIGEST_CHECK_VAR, "0");
+	mPersist.SetValue(TW_SKIP_DIGEST_GENERATE_VAR, "0");
 	mPersist.SetValue(TW_SDEXT_SIZE, "0");
 	mPersist.SetValue(TW_SWAP_SIZE, "0");
 	mPersist.SetValue(TW_SDPART_FILE_SYSTEM, "ext3");
@@ -708,6 +708,14 @@ void DataManager::SetDefaultValues()
 	mData.SetValue("tw_background_thread_running", "0");
 	mData.SetValue(TW_RESTORE_FILE_DATE, "0");
 	mPersist.SetValue("tw_military_time", "0");
+
+#ifdef TW_INCLUDE_CRYPTO
+	mConst.SetValue(TW_USE_SHA2, "1");
+	mConst.SetValue(TW_NO_SHA2, "0");
+#else
+	mConst.SetValue(TW_NO_SHA2, "1");
+#endif
+
 #ifdef TW_NO_SCREEN_TIMEOUT
 	mConst.SetValue("tw_screen_timeout_secs", "0");
 	mConst.SetValue("tw_no_screen_timeout", "1");
@@ -752,7 +760,7 @@ void DataManager::SetDefaultValues()
 		string maxbrightpath = findbright.insert(findbright.rfind('/') + 1, "max_");
 		if (TWFunc::Path_Exists(maxbrightpath)) {
 			ifstream maxVal(maxbrightpath.c_str());
-			if(maxVal >> maxBrightness) {
+			if (maxVal >> maxBrightness) {
 				LOGINFO("Got max brightness %s from '%s'\n", maxBrightness.c_str(), maxbrightpath.c_str());
 			} else {
 				// Something went wrong, set that to indicate error
@@ -819,6 +827,23 @@ void DataManager::SetDefaultValues()
 
 	mData.SetValue("tw_has_adopted_storage", "0");
 
+#ifdef AB_OTA_UPDATER
+	LOGINFO("AB_OTA_UPDATER := true\n");
+	mConst.SetValue("tw_has_boot_slots", "1");
+#else
+	mConst.SetValue("tw_has_boot_slots", "0");
+#endif
+
+#ifdef TW_OEM_BUILD
+	LOGINFO("TW_OEM_BUILD := true\n");
+	mConst.SetValue("tw_oem_build", "1");
+#else
+	mConst.SetValue("tw_oem_build", "0");
+	mPersist.SetValue("tw_app_prompt", "1");
+	mPersist.SetValue("tw_app_install_system", "1");
+	mData.SetValue("tw_app_install_status", "0"); // 0 = no status, 1 = not installed, 2 = already installed
+#endif
+
 	pthread_mutex_unlock(&m_valuesLock);
 }
 
@@ -855,38 +880,37 @@ int DataManager::GetMagicValue(const string& varName, string& value)
 	}
 	else if (varName == "tw_cpu_temp")
 	{
-	   int tw_no_cpu_temp;
-	   GetValue("tw_no_cpu_temp", tw_no_cpu_temp);
-	   if (tw_no_cpu_temp == 1) return -1;
+		int tw_no_cpu_temp;
+		GetValue("tw_no_cpu_temp", tw_no_cpu_temp);
+		if (tw_no_cpu_temp == 1) return -1;
 
-	   string cpu_temp_file;
-	   static unsigned long convert_temp = 0;
-	   static time_t cpuSecCheck = 0;
-	   int divisor = 0;
-	   struct timeval curTime;
-	   string results;
+		string cpu_temp_file;
+		static unsigned long convert_temp = 0;
+		static time_t cpuSecCheck = 0;
+		struct timeval curTime;
+		string results;
 
-	   gettimeofday(&curTime, NULL);
-	   if (curTime.tv_sec > cpuSecCheck)
-	   {
+		gettimeofday(&curTime, NULL);
+		if (curTime.tv_sec > cpuSecCheck)
+		{
 #ifdef TW_CUSTOM_CPU_TEMP_PATH
-		   cpu_temp_file = EXPAND(TW_CUSTOM_CPU_TEMP_PATH);
-		   if (TWFunc::read_file(cpu_temp_file, results) != 0)
-			return -1;
+			cpu_temp_file = EXPAND(TW_CUSTOM_CPU_TEMP_PATH);
+			if (TWFunc::read_file(cpu_temp_file, results) != 0)
+				return -1;
 #else
-		   cpu_temp_file = "/sys/class/thermal/thermal_zone0/temp";
-		   if (TWFunc::read_file(cpu_temp_file, results) != 0)
-			return -1;
+			cpu_temp_file = "/sys/class/thermal/thermal_zone0/temp";
+			if (TWFunc::read_file(cpu_temp_file, results) != 0)
+				return -1;
 #endif
-		   convert_temp = strtoul(results.c_str(), NULL, 0) / 1000;
-		   if (convert_temp <= 0)
-			convert_temp = strtoul(results.c_str(), NULL, 0);
-		   if (convert_temp >= 150)
-			convert_temp = strtoul(results.c_str(), NULL, 0) / 10;
-		   cpuSecCheck = curTime.tv_sec + 5;
-	   }
-	   value = TWFunc::to_string(convert_temp);
-	   return 0;
+			convert_temp = strtoul(results.c_str(), NULL, 0) / 1000;
+			if (convert_temp <= 0)
+				convert_temp = strtoul(results.c_str(), NULL, 0);
+			if (convert_temp >= 150)
+				convert_temp = strtoul(results.c_str(), NULL, 0) / 10;
+			cpuSecCheck = curTime.tv_sec + 5;
+		}
+		value = TWFunc::to_string(convert_temp);
+		return 0;
 	}
 	else if (varName == "tw_battery")
 	{
@@ -906,7 +930,7 @@ int DataManager::GetMagicValue(const string& varName, string& value)
 #else
 			FILE * cap = fopen("/sys/class/power_supply/battery/capacity","rt");
 #endif
-			if (cap){
+			if (cap) {
 				fgets(cap_s, 4, cap);
 				fclose(cap);
 				lastVal = atoi(cap_s);
@@ -979,7 +1003,7 @@ void DataManager::ReadSettingsFile(void)
 #ifndef TW_OEM_BUILD
 	// Load up the values for TWRP - Sleep to let the card be ready
 	char mkdir_path[255], settings_file[255];
-	int is_enc, has_dual, use_ext, has_data_media, has_ext;
+	int is_enc, has_data_media;
 
 	GetValue(TW_IS_ENCRYPTED, is_enc);
 	GetValue(TW_HAS_DATA_MEDIA, has_data_media);

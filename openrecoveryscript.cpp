@@ -95,13 +95,13 @@ int OpenRecoveryScript::copy_script_file(string filename) {
 }
 
 int OpenRecoveryScript::run_script_file(void) {
-	FILE *fp = fopen(SCRIPT_FILE_TMP, "r");
 	int ret_val = 0, cindex, line_len, i, remove_nl, install_cmd = 0, sideload = 0;
 	char script_line[SCRIPT_COMMAND_SIZE], command[SCRIPT_COMMAND_SIZE],
-		 value[SCRIPT_COMMAND_SIZE], mount[SCRIPT_COMMAND_SIZE],
-		 value1[SCRIPT_COMMAND_SIZE], value2[SCRIPT_COMMAND_SIZE];
+	     value[SCRIPT_COMMAND_SIZE], mount[SCRIPT_COMMAND_SIZE],
+	     value1[SCRIPT_COMMAND_SIZE], value2[SCRIPT_COMMAND_SIZE];
 	char *val_start, *tok;
 
+	FILE *fp = fopen(SCRIPT_FILE_TMP, "r");
 	if (fp != NULL) {
 		DataManager::SetValue(TW_SIMULATE_ACTIONS, 0);
 		DataManager::SetValue("ui_progress", 0); // Reset the progress bar
@@ -120,9 +120,9 @@ int OpenRecoveryScript::run_script_file(void) {
 			memset(command, 0, sizeof(command));
 			memset(value, 0, sizeof(value));
 			if ((int)script_line[line_len - 1] == 10)
-					remove_nl = 2;
-				else
-					remove_nl = 1;
+				remove_nl = 2;
+			else
+				remove_nl = 1;
 			if (cindex != 0) {
 				strncpy(command, script_line, cindex);
 				LOGINFO("command is: '%s'\n", command);
@@ -194,7 +194,7 @@ int OpenRecoveryScript::run_script_file(void) {
 				// Restore
 				DataManager::SetValue("tw_action_text2", gui_parse_text("{@restore}"));
 				PartitionManager.Mount_All_Storage();
-				DataManager::SetValue(TW_SKIP_MD5_CHECK_VAR, 0);
+				DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, 0);
 				char folder_path[512], partitions[512];
 
 				string val = value, restore_folder, restore_partitions;
@@ -277,8 +277,8 @@ int OpenRecoveryScript::run_script_file(void) {
 							Restore_List += "/sd-ext;";
 							gui_msg("sdext=SD-EXT");
 						} else if (value2[i] == 'M' || value2[i] == 'm') {
-							DataManager::SetValue(TW_SKIP_MD5_CHECK_VAR, 1);
-							gui_msg("md5_check_skip=MD5 check skip is on");
+							DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, 1);
+							gui_msg("digest_check_skip=Digest check skip is on");
 						}
 					}
 
@@ -520,7 +520,7 @@ int OpenRecoveryScript::Backup_ADB_Command(std::string Options) {
 	args = TWFunc::Split_String(Options, " ");
 
 	DataManager::SetValue(TW_USE_COMPRESSION_VAR, 0);
-	DataManager::SetValue(TW_SKIP_MD5_GENERATE_VAR, 0);
+	DataManager::SetValue(TW_SKIP_DIGEST_GENERATE_VAR, 0);
 
 	if (args[1].compare("--twrp") != 0) {
 		gui_err("twrp_adbbu_option=--twrp option is required to enable twrp adb backup");
@@ -604,12 +604,11 @@ int OpenRecoveryScript::Backup_Command(string Options) {
 	char value1[SCRIPT_COMMAND_SIZE];
 	int line_len, i;
 	string Backup_List;
-	bool adbbackup = false;
 
 	strcpy(value1, Options.c_str());
 
 	DataManager::SetValue(TW_USE_COMPRESSION_VAR, 0);
-	DataManager::SetValue(TW_SKIP_MD5_GENERATE_VAR, 0);
+	DataManager::SetValue(TW_SKIP_DIGEST_GENERATE_VAR, 0);
 
 	gui_msg("select_backup_opt=Setting backup options:");
 	line_len = Options.size();
@@ -645,8 +644,8 @@ int OpenRecoveryScript::Backup_Command(string Options) {
 			DataManager::SetValue(TW_USE_COMPRESSION_VAR, 1);
 			gui_msg("compression_on=Compression is on");
 		} else if (Options.substr(i, 1) == "M" || Options.substr(i, 1) == "m") {
-			DataManager::SetValue(TW_SKIP_MD5_GENERATE_VAR, 1);
-			gui_msg("md5_off=MD5 Generation is off");
+			DataManager::SetValue(TW_SKIP_DIGEST_GENERATE_VAR, 1);
+			gui_msg("digest_off=Digest Generation is off");
 		}
 	}
 	DataManager::SetValue("tw_backup_list", Backup_List);
@@ -748,22 +747,31 @@ int OpenRecoveryScript::Restore_ADB_Backup(void) {
 	bool breakloop = false;
 	int partition_count = 0;
 	std::string Restore_Name;
-	std::size_t pos = 0;
 	struct AdbBackupFileTrailer adbmd5;
 	struct PartitionSettings part_settings;
-	int adb_control_twrp_fd, adb_write_fd, systemro;
+	int adb_control_twrp_fd;
 	int adb_control_bu_fd, ret = 0;
 	char cmd[512];
-	int orsfd = open(ORS_OUTPUT_FILE, O_WRONLY);
 
 	part_settings.total_restore_size = 0;
 
 	PartitionManager.Mount_All_Storage();
-	DataManager::SetValue(TW_SKIP_MD5_CHECK_VAR, 0);
+	DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, 0);
+
 	LOGINFO("opening TW_ADB_BU_CONTROL\n");
 	adb_control_bu_fd = open(TW_ADB_BU_CONTROL, O_WRONLY | O_NONBLOCK);
+	if (adb_control_bu_fd < 0) {
+		LOGERR("Error opening TW_ADB_BU_CONTROL\n");
+		return -1;
+	}
 	LOGINFO("opening TW_ADB_TWRP_CONTROL\n");
 	adb_control_twrp_fd = open(TW_ADB_TWRP_CONTROL, O_RDONLY | O_NONBLOCK);
+	if (adb_control_twrp_fd < 0) {
+		LOGERR("Error opening TW_ADB_TWRP_CONTROL\n");
+		close(adb_control_bu_fd);
+		return -1;
+	}
+
 	memset(&adbmd5, 0, sizeof(adbmd5));
 
 	while (!breakloop) {
@@ -849,6 +857,8 @@ int OpenRecoveryScript::Restore_ADB_Backup(void) {
 					part_settings.progress = &progress;
 					if (!PartitionManager.Restore_Partition(&part_settings)) {
 						LOGERR("ADB Restore failed.\n");
+						close(adb_control_twrp_fd);
+						close(adb_control_bu_fd);
 						return 1;
 					}
 				}
@@ -884,6 +894,8 @@ int OpenRecoveryScript::Restore_ADB_Backup(void) {
 								LOGERR("Cannot write to ADB_CONTROL_BU_FD: %s\n", strerror(errno));
 							}
 							gui_msg(Msg(msg::kError, "restore_read_only=Cannot restore {1} -- mounted read only.")(part_settings.Part->Backup_Display_Name));
+							close(adb_control_twrp_fd);
+							close(adb_control_bu_fd);
 							return 1;
 
 						}
@@ -891,18 +903,23 @@ int OpenRecoveryScript::Restore_ADB_Backup(void) {
 					part_settings.partition_count = partition_count;
 					part_settings.adbbackup = true;
 					part_settings.adb_compression = twimghdr.compressed;
+					part_settings.Part->Set_Backup_FileName(part_settings.Part->Get_Backup_Name() + "." + part_settings.Part->Current_File_System + ".win");
 					part_settings.total_restore_size += part_settings.Part->Get_Restore_Size(&part_settings);
 					part_settings.PM_Method = PM_RESTORE;
 					ProgressTracking progress(part_settings.total_restore_size);
 					part_settings.progress = &progress;
 					if (!PartitionManager.Restore_Partition(&part_settings)) {
 						LOGERR("ADB Restore failed.\n");
+						close(adb_control_twrp_fd);
+						close(adb_control_bu_fd);
 						return 1;
 					}
 				}
 			}
 		}
 	}
+	close(adb_control_twrp_fd);
+	close(adb_control_bu_fd);
 	gui_msg("restore_complete=Restore Complete");
 
 	if (!twadbbu::Write_TWENDADB())

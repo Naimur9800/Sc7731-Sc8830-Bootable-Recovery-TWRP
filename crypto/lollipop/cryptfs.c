@@ -713,13 +713,13 @@ static void get_device_scrypt_params(struct crypt_mnt_ftr *ftr) {
 
 static unsigned int get_blkdev_size(int fd)
 {
-  unsigned int nr_sec;
+  unsigned long nr_sec;
 
   if ( (ioctl(fd, BLKGETSIZE, &nr_sec)) == -1) {
     nr_sec = 0;
   }
 
-  return nr_sec;
+  return (unsigned int) nr_sec;
 }
 
 static int get_crypt_ftr_info(char **metadata_fname, off64_t *off)
@@ -1099,6 +1099,13 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr *crypt_ftr, const unsigned
                                          fd, extra_params);
   if (load_count < 0) {
       printf("Cannot load dm-crypt mapping table.\n");
+
+      // Remove the dm-crypt device, otherwise it cannot be used later on by other
+      // processes (eg vold_decrypt) or further testing/debugging in recovery
+      ioctl_init(io, DM_CRYPT_BUF_SIZE, name, 0);
+      if (ioctl(fd, DM_DEV_REMOVE, io)) {
+        printf("Cannot remove dm-crypt device %i\n", errno);
+      }
       goto errout;
   } else if (load_count > 1) {
       printf("Took %d tries to load dmcrypt table.\n", load_count);
@@ -1109,6 +1116,13 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr *crypt_ftr, const unsigned
 
   if (ioctl(fd, DM_DEV_SUSPEND, io)) {
     printf("Cannot resume the dm-crypt device\n");
+
+    // Remove the dm-crypt device, otherwise it cannot be used later on by other
+    // processes (eg vold_decrypt) or further testing/debugging in recovery
+    ioctl_init(io, DM_CRYPT_BUF_SIZE, name, 0);
+    if (ioctl(fd, DM_DEV_REMOVE, io)) {
+      printf("Cannot remove dm-crypt device %i\n", errno);
+    }
     goto errout;
   }
 
@@ -1328,6 +1342,21 @@ static int decrypt_master_key(char *passwd, unsigned char *decrypted_master_key,
     return ret;
 }
 
+static int try_mount_multiple_fs(const char *crypto_blkdev,
+                                 const char *mount_point,
+                                 const char *file_system)
+{
+    if (!mount(crypto_blkdev, mount_point, file_system, 0, NULL))
+        return 0;
+    if (strcmp(file_system, "ext4") &&
+        !mount(crypto_blkdev, mount_point, "ext4", 0, NULL))
+        return 0;
+    if (strcmp(file_system, "f2fs") &&
+        !mount(crypto_blkdev, mount_point, "f2fs", 0, NULL))
+        return 0;
+    return 1;
+}
+
 static int test_mount_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
                                    char *passwd, char *mount_point, char *label)
 {
@@ -1426,7 +1455,7 @@ static int test_mount_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
      * the footer, not the key. */
     sprintf(tmp_mount_point, "%s/tmp_mnt", mount_point);
     mkdir(tmp_mount_point, 0755);
-    if (mount(crypto_blkdev, tmp_mount_point, file_system, 0, NULL) != 0) {
+    if (try_mount_multiple_fs(crypto_blkdev, tmp_mount_point, file_system)) {
       printf("Error temp mounting decrypted block device '%s'\n", crypto_blkdev);
       delete_crypto_blk_dev(label);
       rc = 1;
